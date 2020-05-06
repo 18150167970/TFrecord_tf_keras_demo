@@ -1,0 +1,27 @@
+# TFrecord_tf_keras_demo #
+
+This work do:
+
+1. Convert image dataset to TFrecord. 
+2. Using TFrecord to train tf.keras model, and save model.
+
+How to use:
+
+please modify data path of code with you use. 
+
+data format
+
+```
+--data    
+    --trainset
+        --classname1
+            --file1
+            --file2
+            ....
+        --classname2
+```
+
+
+
+[blog](https://blog.csdn.net/a362682954/article/details/105960320)   
+
