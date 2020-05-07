@@ -21,7 +21,9 @@ data format
         --classname2
 ```
 
+2020.5.7 update:
 
+add data augmentation, if you want use it, please modify Images_to_TFrecords.py, set is_augmentation True.
 
 [blog](https://blog.csdn.net/a362682954/article/details/105960320)   
 
