@@ -1,162 +1,159 @@
 # -*- coding: utf-8 -*-
 """
-Created on Fri Jun 30 23:53:56 2017
-
-@author: zhangxu
 """
-import tensorflow as tf
-from PIL import Image
-import matplotlib.pyplot as plt
-from tensorflow.python.framework.convert_to_constants import convert_variables_to_constants_v2
 
-n_classes = 2
-feature_description = {  # 定义Feature结构，告诉解码器每个Feature的类型是什么
-    'label': tf.FixedLenFeature([], tf.int64),
-    'img_raw': tf.FixedLenFeature([], tf.string),
-    'img_width': tf.FixedLenFeature([], tf.int64),
-    'img_height': tf.FixedLenFeature([], tf.int64)
+import numpy as np
+import os
+import tensorflow as tf
+import cv2
+from PIL import Image
+from tqdm import tqdm
+from sklearn.utils import shuffle
+from data_augmentation import *
+
+_available_augmentation = {
+    mean_white_balance, perfect_reflective_white_balance, gray_world_assumes_white_balance,
+    color_correction_of_image_analysis, dynamic_threshold_white_balance, gamma_trans,
+    contrast_image_correction, flip_img
 }
 
 
-def read_and_decode(example_string):
-    '''
-    从TFrecord格式文件中读取数据
-    '''
+def image_path_load(train_path, classes, is_shuffle=True):
+    """"加载数据，数据文件夹为
+    --trainset
+        --classname1
+            --file1
+            --file2
+            ....
+        --classname2
+        ....
 
-    features = tf.parse_single_example(example_string,
-                                       features={
-                                           'label': tf.FixedLenFeature([], tf.int64),
-                                           'img_raw': tf.FixedLenFeature([], tf.string),
-                                           'img_width': tf.FixedLenFeature([], tf.int64),
-                                           'img_height': tf.FixedLenFeature([], tf.int64)
-                                       })
+    :param train_path(str):数据路径
+    :param image_size(int):图像大小
+    :param classes:类别
+    :param is_augmentation(bool):是否进行数据扩增
 
-    img = tf.decode_raw(features['img_raw'], tf.uint8)
-    img = tf.reshape(img, [224, 224, 3])
-    img = tf.cast(img, tf.float32) * (1. / 255) - 0.5
-    label = tf.cast(features['label'], tf.int64)
-    label = tf.one_hot(label, n_classes)
-    return img, label
+    :return images:图像集 path
+    :return labels:标签集
+    """
+    images_path = []
+    labels = []
+    print('Reading training images')
+    for fld in classes:  # assuming data directory has a separate folder for each class, and that each folder is named after the class
+        index = classes.index(fld)
+        print('Loading {} files (Index: {})'.format(fld, index))
+        path = os.path.join(train_path, fld)
+        files = os.listdir(path)
+        for file in tqdm(files):
+            read_number = 0
+            image_file_path = os.path.join(path, file)
+            second_files = os.listdir(image_file_path)
+            for fl in second_files:
+                if fl[-4:] != ".jpg" and fl[-4:] != ".png":
+                    continue
+                read_number += 1
 
-
-def get_dataset_batch(data_files, batch_size=4):
-    dataset = tf.data.TFRecordDataset(data_files)
-    dataset = dataset.repeat()  # 重复数据集
-    dataset = dataset.map(read_and_decode)  # 解析数据
-    dataset = dataset.shuffle(buffer_size=100)  # 在缓冲区中随机打乱数据
-    batch = dataset.batch(batch_size=batch_size)  # 每10条数据为一个batch，生成一个新的Datasets
-    return batch
-
-
-def get_model():
-    model = tf.keras.applications.MobileNetV2(include_top=False, weights=None)
-    inputs = tf.keras.layers.Input(shape=(224, 224, 3))
-    x = model(inputs)  # 此处x为MobileNetV2模型去处顶层时输出的特征相应图。
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
-    outputs = tf.keras.layers.Dense(2, activation='softmax',
-                                    use_bias=True, name='Logits')(x)
-    model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
-    model.summary()
-    return model
-
-
-def train(model, batch):
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-        loss="categorical_crossentropy",
-        metrics=["accuracy"],
-    )
-
-    model.fit(batch, epochs=10, steps_per_epoch=1000)
-    return model
+                image_path = os.path.join(image_file_path, fl)
+                images_path.append(image_path)
+                label = index
+                labels.append(label)
+    if is_shuffle:
+        images_path, labels = shuffle(images_path, labels)
+    labels = np.array(labels)
+    return images_path, labels
 
 
-def model_save(model, save_path):
-    # tf.enable_eager_execution()
-    full_model = tf.function(lambda x: model(x))
-    full_model = full_model.get_concrete_function(
-        tf.TensorSpec(model.inputs[0].shape, model.inputs[0].dtype))
+def image_to_tfrecord(image_path_list, labels, tfrecord_save_path, tfrecord_image_number, is_augmentation=False):
+    """
+    :param image_path: image path list
+    :param tfrecord_save_path: tfrecord save path
+    :param tfrecord_image_number:per tfrecord save image number
+    """
 
-    # Get frozen ConcreteFunction
-    frozen_func = convert_variables_to_constants_v2(full_model)
-    frozen_func.graph.as_graph_def()
-    tf.io.write_graph(graph_or_graph_def=frozen_func.graph,
-                      logdir=save_path,
-                      name="frozen_graph.pb",
-                      as_text=False)
+    # 存放图片个数
+    bestnum = tfrecord_image_number
+    # 第几个图片
+    num = 0
+    # 第几个TFRecord文件
+    recordfilenum = 0
+
+    if not os.path.exists(tfrecord_save_path):
+        os.mkdir(tfrecord_save_path)
+
+    ftrecordfilename = ("traindata.tfrecords-%.4d" % recordfilenum)
+    writer = tf.io.TFRecordWriter(os.path.join(tfrecord_save_path, ftrecordfilename))
+    # 类别和路径
+
+    for image_path, label in tqdm(zip(image_path_list, labels)):
+        num = num + 1
+        if num > bestnum:
+            num = 1
+            recordfilenum = recordfilenum + 1
+            # tfrecords格式文件名
+            writer.close()
+            ftrecordfilename = ("traindata.tfrecords-%.4d" % recordfilenum)
+            writer = tf.io.TFRecordWriter(os.path.join(tfrecord_save_path, ftrecordfilename))
+
+        # img = Image.open(image_path, 'r')
+        # print(image_path)
+        img = cv2.imread(image_path)
+        img = cv2.resize(img, (224, 224))
+        size = img.shape
+
+        if is_augmentation:
+            for augmentation_type in _available_augmentation:
+                try:
+                    img_augmentation = augmentation_type(img)
+                    img_raw = img_augmentation.tobytes()  # 将图片转化为二进制格式
+                    example = tf.train.Example(
+                        features=tf.train.Features(feature={
+                            'label': tf.train.Feature(int64_list=tf.train.Int64List(value=[label])),
+                            'img_raw': tf.train.Feature(bytes_list=tf.train.BytesList(value=[img_raw])),
+                            'img_width': tf.train.Feature(int64_list=tf.train.Int64List(value=[size[0]])),
+                            'img_height': tf.train.Feature(int64_list=tf.train.Int64List(value=[size[1]]))
+                        }))
+                    writer.write(example.SerializeToString())  # 序列化为字符串
+                    num = num + 1
+                    if num > bestnum:
+                        num = 1
+                        recordfilenum = recordfilenum + 1
+                        # tfrecords格式文件名
+                        writer.close()
+                        ftrecordfilename = ("traindata.tfrecords-%.4d" % recordfilenum)
+                        writer = tf.io.TFRecordWriter(os.path.join(tfrecord_save_path, ftrecordfilename))
+                except:
+                    pass
+
+        img_raw = img.tobytes()  # 将图片转化为二进制格式
+        example = tf.train.Example(
+            features=tf.train.Features(feature={
+                'label': tf.train.Feature(int64_list=tf.train.Int64List(value=[label])),
+                'img_raw': tf.train.Feature(bytes_list=tf.train.BytesList(value=[img_raw])),
+                'img_width': tf.train.Feature(int64_list=tf.train.Int64List(value=[size[0]])),
+                'img_height': tf.train.Feature(int64_list=tf.train.Int64List(value=[size[1]]))
+            }))
+        writer.write(example.SerializeToString())  # 序列化为字符串
+    writer.close()
 
 
-if __name__ == "__main__":
-    # TFRecord文件路径
-    # tf.enable_eager_execution()
-    data_path = 'tfrecord/testset/*'
-    save_path = "model/frozen_graph.h5"
-    batch_size = 4
-    # 获取文件名列表
-    data_files = tf.gfile.Glob(data_path)
-    # print(data_files)
-    print("************get dataset batch ***********")
-    batch = get_dataset_batch(data_files, batch_size=batch_size)
-    model = get_model()
-    print("************gstart train ***********")
-    model = train(model, batch)
-    model.save(save_path)
+if __name__ == '__main__':
+    datasets = ['trainset', 'testset']
+    # 图片路径
+    data_path = 'data'
+    # 文件路径
+    tfrecord_save_path = 'tfrecord'
+    is_augmentation = True
+    if not os.path.exists(tfrecord_save_path):
+        os.mkdir(tfrecord_save_path)
+    # 存放图片个数
+    tfrecord_image_number = 100
+    # 类别  classe
+    classes = ['ImposterFace',
+               'ClientFace']
+    for dataset in datasets:
+        image_path = os.path.join(data_path, dataset)
 
-# 文件名列表生成器
-
-# def read_and_decode(filename, n_classes=2, batch_size=8):
-#     filename_queue = tf.train.string_input_producer(filename)
-#
-#     reader = tf.TFRecordReader()
-#     _, serialized_example = reader.read(filename_queue)
-#     features = tf.parse_single_example(serialized_example,
-#                                        features={
-#                                            'label': tf.FixedLenFeature([], tf.int64),
-#                                            'img_raw': tf.FixedLenFeature([], tf.string),
-#                                            'img_width': tf.FixedLenFeature([], tf.int64),
-#                                            'img_height': tf.FixedLenFeature([], tf.int64)
-#                                        })
-#
-#     img = tf.decode_raw(features['img_raw'], tf.uint8)
-#     img = tf.reshape(img, [224, 224, 3])
-#     img = tf.cast(img, tf.float32) * (1. / 255) - 0.5
-#     label = tf.cast(features['label'], tf.int64)
-#
-#     image_batch, label_batch = tf.train.shuffle_batch([img, label],
-#                                                       batch_size=batch_size,
-#                                                       capacity=2000,
-#                                                       min_after_dequeue=1000)
-#
-#     label_batch = tf.one_hot(label_batch, n_classes)
-#     label_batch = tf.cast(label_batch, dtype=tf.int64)
-#     label_batch = tf.reshape(label_batch, [batch_size, n_classes])
-#
-#     dataset = reader.map(image_batch, label_batch)
-#     dataset = reader.batch(batch_size)
-#     iterator = dataset.make_one_shot_iterator()
-#     skeleton, label = iterator.get_next()
-#     return skeleton, label
-#
-#
-#
-# x_train, y_train = read_and_decode(data_files)
-
-
-# raw_dataset = tf.data.TFRecordDataset(data_files)
-# model = tf.keras.applications.MobileNetV2(include_top=False, weights=None)
-# inputs = tf.keras.layers.Input(shape=(224, 224, 3))
-# x = model(inputs)  # 此处x为MobileNetV2模型去处顶层时输出的特征相应图。
-# x = tf.keras.layers.GlobalAveragePooling2D()(x)
-# outputs = tf.keras.layers.Dense(2, activation='softmax',
-#                                 use_bias=True, name='Logits')(x)
-# model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
-# model.summary()
-# model.compile(
-#     optimizer=tf.train.AdamOptimizer(0.001),
-#     loss="categorical_crossentropy",
-#     metrics=["accuracy"],
-# )
-#
-# history = model.fit_generator(x_train, y_train,
-#                               epochs=10,
-#                               )
+        images_path_list, labels = image_path_load(image_path, classes)
+        # tfrecords格式文件名
+        save_paths = os.path.join(tfrecord_save_path, dataset)
+        image_to_tfrecord(images_path_list, labels, save_paths, tfrecord_image_number, is_augmentation)
